@@ -2239,7 +2239,7 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
                                         MemoryRegion *sysmem)
 {
     int max_cpus = MACHINE(vms)->smp.max_cpus;
-    bool aarch64, pmu, steal_time, pv_lock;
+    bool aarch64, pmu, steal_time, pv_lock, pv_spinlock;
     CPUState *cpu;
 
     aarch64 = object_property_get_bool(OBJECT(first_cpu), "aarch64", NULL);
@@ -2248,6 +2248,8 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
                                           "kvm-steal-time", NULL);
     pv_lock = object_property_get_bool(OBJECT(first_cpu),
                                        "kvm-pv-preempted", NULL);
+    pv_spinlock = object_property_get_bool(OBJECT(first_cpu),
+                                           "kvm-pv-spinlock", NULL);
 
     if (kvm_enabled()) {
         hwaddr pvtime_reg_base = vms->memmap[VIRT_PVTIME].base;
@@ -2265,6 +2267,14 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
                 exit(1);
             }
             pv_lock = false;
+        }
+
+        if (pv_spinlock && !kvm_arm_pv_spinlock_supported(ARM_CPU(first_cpu))) {
+            if (ARM_CPU(first_cpu)->kvm_pv_spinlock == ON_OFF_AUTO_ON) {
+                error_report("'kvm-pv-spinlock' cannot be enabled on this host");
+                exit(1);
+            }
+            pv_spinlock = false;
         }
 
         if (steal_time) {
@@ -2325,6 +2335,9 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
                 kvm_arm_pvlock_init(ARM_CPU(cpu), pvlock_reg_base
                                                   + cpu->cpu_index
                                                     * PVLOCK_SIZE_PER_CPU);
+            }
+            if (pv_spinlock) {
+                kvm_arm_pvspinlock_init(ARM_CPU(cpu));
             }
         }
     } else {
@@ -2517,6 +2530,11 @@ static void machvirt_init(MachineState *machine)
         if (vmc->no_kvm_pv_preempted &&
             object_property_find(cpuobj, "kvm-pv-preempted")) {
             object_property_set_bool(cpuobj, "kvm-pv-preempted", false, NULL);
+        }
+
+        if (vmc->no_kvm_pv_spinlock &&
+            object_property_find(cpuobj, "kvm-pv-spinlock")) {
+            object_property_set_bool(cpuobj, "kvm-pv-spinlock", false, NULL);
         }
 
         if (vmc->no_tcg_lpa2 && object_property_find(cpuobj, "lpa2")) {
@@ -3857,6 +3875,7 @@ static void virt_machine_10_2_options(MachineClass *mc)
     virt_machine_11_0_options(mc);
     compat_props_add(mc->compat_props, hw_compat_10_2, hw_compat_10_2_len);
     vmc->no_kvm_pv_preempted = true;
+    vmc->no_kvm_pv_spinlock = true;
 }
 DEFINE_VIRT_MACHINE(10, 2)
 

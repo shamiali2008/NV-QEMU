@@ -529,6 +529,16 @@ static void kvm_pv_preempted_set(Object *obj, bool value, Error **errp)
     ARM_CPU(obj)->kvm_pv_preempted = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
 }
 
+static bool kvm_pv_spinlock_get(Object *obj, Error **errp)
+{
+    return ARM_CPU(obj)->kvm_pv_spinlock != ON_OFF_AUTO_OFF;
+}
+
+static void kvm_pv_spinlock_set(Object *obj, bool value, Error **errp)
+{
+    ARM_CPU(obj)->kvm_pv_spinlock = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+}
+
 static char *kvm_get_psci_version(Object *obj, Error **errp)
 {
     ARMCPU *cpu = ARM_CPU(obj);
@@ -579,6 +589,13 @@ void kvm_arm_add_vcpu_properties(ARMCPU *cpu)
     object_property_set_description(obj, "kvm-pv-preempted",
                                     "Set off to disable KVM PV vcpu_is_preempted "
                                     "(shared preempted state).");
+
+    cpu->kvm_pv_spinlock = ON_OFF_AUTO_AUTO;
+    object_property_add_bool(obj, "kvm-pv-spinlock", kvm_pv_spinlock_get,
+                             kvm_pv_spinlock_set);
+    object_property_set_description(obj, "kvm-pv-spinlock",
+                                    "Set off to disable KVM PV queued "
+                                    "spinlock (park/kick).");
 
     object_property_add_str(obj, "kvm-psci-version", kvm_get_psci_version,
                             kvm_set_psci_version);
@@ -1964,6 +1981,66 @@ void kvm_arm_pvlock_init(ARMCPU *cpu, uint64_t ipa)
     }
     if (!kvm_arm_set_device_attr(cpu, &attr, "PVLOCK IPA")) {
         error_report("failed to init PVLOCK IPA");
+        abort();
+    }
+}
+
+/*
+ * Read-modify-write a firmware feature bitmap pseudo-register before the
+ * vCPU first runs, and keep this vCPU's cpreg cache in sync so the next
+ * kvm_arch_put_registers() does not write the stale value back.
+ */
+static int kvm_arm_fw_bmap_update(ARMCPU *cpu, uint64_t regid,
+                                  uint64_t set, uint64_t clear)
+{
+    CPUState *cs = CPU(cpu);
+    uint64_t bmap;
+    int i, ret;
+
+    ret = kvm_get_one_reg(cs, regid, &bmap);
+    if (ret) {
+        return ret;
+    }
+    bmap = (bmap | set) & ~clear;
+    ret = kvm_set_one_reg(cs, regid, &bmap);
+    if (ret) {
+        return ret;
+    }
+    for (i = 0; i < cpu->cpreg_array_len; i++) {
+        if (cpu->cpreg_indexes[i] == regid) {
+            cpu->cpreg_values[i] = bmap;
+            break;
+        }
+    }
+    return 0;
+}
+
+/*
+ * The PV qspinlock control bit has negative polarity and only exists on a
+ * host kernel with the feature, where KVM's default has it set (= off).
+ * So "bit set in the default" is the support probe.
+ */
+bool kvm_arm_pv_spinlock_supported(ARMCPU *cpu)
+{
+    uint64_t bmap;
+
+    if (kvm_get_one_reg(CPU(cpu), KVM_REG_ARM_VENDOR_HYP_BMAP, &bmap)) {
+        return false;
+    }
+    return bmap & (1ULL << KVM_REG_ARM_VENDOR_HYP_BIT_NOPVSPINLOCK);
+}
+
+void kvm_arm_pvspinlock_init(ARMCPU *cpu)
+{
+    int ret;
+
+    if (cpu->kvm_pv_spinlock == ON_OFF_AUTO_OFF) {
+        return;
+    }
+    ret = kvm_arm_fw_bmap_update(cpu, KVM_REG_ARM_VENDOR_HYP_BMAP, 0,
+                                 1ULL << KVM_REG_ARM_VENDOR_HYP_BIT_NOPVSPINLOCK);
+    if (ret) {
+        error_report("failed to enable PV qspinlock: %s", strerror(-ret));
         abort();
     }
 }

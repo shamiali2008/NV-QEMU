@@ -133,6 +133,7 @@ struct VirtMachineClass {
     bool no_highmem_compact;
     bool no_kvm_steal_time;
     bool no_kvm_pv_preempted;
+    bool no_kvm_pv_spinlock;
     bool acpi_expose_flash;
     bool no_secure_gpio;
     /* Machines < 6.2 have no support for describing cpu topology to guest */

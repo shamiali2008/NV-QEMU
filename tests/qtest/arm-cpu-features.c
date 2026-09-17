@@ -470,6 +470,7 @@ static void test_query_cpu_model_expansion(const void *data)
     assert_has_not_feature(qts, "max", "kvm-no-adjvtime");
     assert_has_not_feature(qts, "max", "kvm-steal-time");
     assert_has_not_feature(qts, "max", "kvm-pv-preempted");
+    assert_has_not_feature(qts, "max", "kvm-pv-spinlock");
 
     if (g_str_equal(qtest_get_arch(), "aarch64")) {
         assert_has_feature_enabled(qts, "max", "aarch64");
@@ -520,6 +521,7 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
         bool kvm_supports_pmu;
         bool kvm_supports_steal_time;
         bool kvm_supports_pv_lock;
+        bool kvm_supports_pv_spinlock;
         bool kvm_supports_sve;
         uint32_t max_vq, vq;
         uint64_t vls;
@@ -558,6 +560,7 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
         kvm_supports_pmu = resp_get_feature(resp, "pmu");
         kvm_supports_steal_time = resp_get_feature(resp, "kvm-steal-time");
         kvm_supports_pv_lock = resp_get_feature(resp, "kvm-pv-preempted");
+        kvm_supports_pv_spinlock = resp_get_feature(resp, "kvm-pv-spinlock");
         kvm_supports_sve = resp_get_feature(resp, "sve");
         vls = resp_get_sve_vls(resp);
         qobject_unref(resp);
@@ -578,6 +581,11 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
             /* If we have pv-lock then we should be able to toggle it. */
             assert_set_feature(qts, "host", "kvm-pv-preempted", false);
             assert_set_feature(qts, "host", "kvm-pv-preempted", true);
+        }
+
+        if (kvm_supports_pv_spinlock) {
+            assert_set_feature(qts, "host", "kvm-pv-spinlock", false);
+            assert_set_feature(qts, "host", "kvm-pv-spinlock", true);
         }
 
         if (kvm_supports_sve) {
@@ -649,6 +657,7 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
         assert_has_not_feature(qts, "host", "sve");
         assert_has_not_feature(qts, "host", "kvm-steal-time");
         assert_has_not_feature(qts, "host", "kvm-pv-preempted");
+        assert_has_not_feature(qts, "host", "kvm-pv-spinlock");
     }
 
     qtest_quit(qts);

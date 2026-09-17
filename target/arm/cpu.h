@@ -1049,6 +1049,9 @@ struct ArchCPU {
     /* KVM PV lock (vcpu_is_preempted) */
     OnOffAuto kvm_pv_preempted;
 
+    /* KVM PV queued spinlock (park/kick) */
+    OnOffAuto kvm_pv_spinlock;
+
     /* Uniprocessor system with MP extensions */
     bool mp_is_up;
 

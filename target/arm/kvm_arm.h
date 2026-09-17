@@ -240,6 +240,23 @@ bool kvm_arm_pv_lock_supported(ARMCPU *cpu);
  */
 void kvm_arm_pvlock_init(ARMCPU *cpu, uint64_t ipa);
 
+/**
+ * kvm_arm_pv_spinlock_supported:
+ * @cpu: ARMCPU (must be realized: reads a vCPU pseudo-register)
+ *
+ * Returns: true if KVM implements the PV queued spinlock kick service.
+ */
+bool kvm_arm_pv_spinlock_supported(ARMCPU *cpu);
+
+/**
+ * kvm_arm_pvspinlock_init:
+ * @cpu: ARMCPU
+ *
+ * Enables the PV queued spinlock kick hypercall for the VM (per-VM bitmap,
+ * harmless to repeat per vCPU). Must run before the vCPU first executes.
+ */
+void kvm_arm_pvspinlock_init(ARMCPU *cpu);
+
 int kvm_arm_set_irq(int cpu, int irqtype, int irq, int level);
 
 void kvm_arm_enable_mte(Object *cpuobj, Error **errp);
