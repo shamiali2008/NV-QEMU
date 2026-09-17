@@ -223,6 +223,23 @@ void kvm_arm_pmu_set_irq(ARMCPU *cpu, int irq);
  */
 void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa);
 
+/**
+ * kvm_arm_pv_lock_supported:
+ * @cpu: ARMCPU (must be realized: probes the vCPU fd)
+ *
+ * Returns: true if KVM implements the PV lock vCPU attribute.
+ */
+bool kvm_arm_pv_lock_supported(ARMCPU *cpu);
+
+/**
+ * kvm_arm_pvlock_init:
+ * @cpu: ARMCPU
+ * @ipa: Per-vcpu guest physical base address of the pvlock structures
+ *
+ * Initializes PV lock for the VCPU, setting the PVLOCK IPA to @ipa.
+ */
+void kvm_arm_pvlock_init(ARMCPU *cpu, uint64_t ipa);
+
 int kvm_arm_set_irq(int cpu, int irqtype, int irq, int level);
 
 void kvm_arm_enable_mte(Object *cpuobj, Error **errp);

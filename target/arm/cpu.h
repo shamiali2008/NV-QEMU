@@ -1046,6 +1046,9 @@ struct ArchCPU {
     /* KVM steal time */
     OnOffAuto kvm_steal_time;
 
+    /* KVM PV lock (vcpu_is_preempted) */
+    OnOffAuto kvm_pv_preempted;
+
     /* Uniprocessor system with MP extensions */
     bool mp_is_up;
 

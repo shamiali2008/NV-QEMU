@@ -48,6 +48,8 @@
 
 /* See Linux kernel arch/arm64/include/asm/pvclock-abi.h */
 #define PVTIME_SIZE_PER_CPU 64
+/* See Linux kernel arch/arm64/include/asm/pvlock-abi.h */
+#define PVLOCK_SIZE_PER_CPU 64
 
 /* GPIO pins */
 #define GPIO_PIN_POWER_BUTTON  3
@@ -81,6 +83,7 @@ enum {
     VIRT_ACPI_GED,
     VIRT_NVDIMM_ACPI,
     VIRT_PVTIME,
+    VIRT_PVLOCK,
     VIRT_ACPI_PCIHP,
     VIRT_LOWMEMMAP_LAST,
 };
@@ -129,6 +132,7 @@ struct VirtMachineClass {
     bool no_tcg_its;
     bool no_highmem_compact;
     bool no_kvm_steal_time;
+    bool no_kvm_pv_preempted;
     bool acpi_expose_flash;
     bool no_secure_gpio;
     /* Machines < 6.2 have no support for describing cpu topology to guest */

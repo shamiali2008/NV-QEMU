@@ -196,6 +196,7 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_PVTIME] =             { 0x090a0000, 0x00010000 },
     [VIRT_SECURE_GPIO] =        { 0x090b0000, 0x00001000 },
     [VIRT_ACPI_PCIHP] =         { 0x090c0000, ACPI_PCIHP_SIZE },
+    [VIRT_PVLOCK] =             { 0x090d0000, 0x00010000 },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
@@ -2238,17 +2239,33 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
                                         MemoryRegion *sysmem)
 {
     int max_cpus = MACHINE(vms)->smp.max_cpus;
-    bool aarch64, pmu, steal_time;
+    bool aarch64, pmu, steal_time, pv_lock;
     CPUState *cpu;
 
     aarch64 = object_property_get_bool(OBJECT(first_cpu), "aarch64", NULL);
     pmu = object_property_get_bool(OBJECT(first_cpu), "pmu", NULL);
     steal_time = object_property_get_bool(OBJECT(first_cpu),
                                           "kvm-steal-time", NULL);
+    pv_lock = object_property_get_bool(OBJECT(first_cpu),
+                                       "kvm-pv-preempted", NULL);
 
     if (kvm_enabled()) {
         hwaddr pvtime_reg_base = vms->memmap[VIRT_PVTIME].base;
         hwaddr pvtime_reg_size = vms->memmap[VIRT_PVTIME].size;
+        hwaddr pvlock_reg_base = vms->memmap[VIRT_PVLOCK].base;
+        hwaddr pvlock_reg_size = vms->memmap[VIRT_PVLOCK].size;
+
+        /*
+         * No KVM_CAP for PV lock; probe the vCPU attribute instead. With the
+         * default "auto" a host kernel without support just disables it.
+         */
+        if (pv_lock && !kvm_arm_pv_lock_supported(ARM_CPU(first_cpu))) {
+            if (ARM_CPU(first_cpu)->kvm_pv_preempted == ON_OFF_AUTO_ON) {
+                error_report("'kvm-pv-preempted' cannot be enabled on this host");
+                exit(1);
+            }
+            pv_lock = false;
+        }
 
         if (steal_time) {
             MemoryRegion *pvtime = g_new(MemoryRegion, 1);
@@ -2268,6 +2285,24 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
             memory_region_init_ram(pvtime, NULL, "pvtime", pvtime_size, NULL);
             memory_region_add_subregion(sysmem, pvtime_reg_base, pvtime);
         }
+        if (pv_lock) {
+            MemoryRegion *pvlock = g_new(MemoryRegion, 1);
+            hwaddr pvlock_size = max_cpus * PVLOCK_SIZE_PER_CPU;
+
+            /* The memory region size must be a multiple of host page size. */
+            pvlock_size = REAL_HOST_PAGE_ALIGN(pvlock_size);
+
+            if (pvlock_size > pvlock_reg_size) {
+                error_report("pvlock requires a %" HWADDR_PRId
+                             " byte memory region for %d CPUs,"
+                             " but only %" HWADDR_PRId " has been reserved",
+                             pvlock_size, max_cpus, pvlock_reg_size);
+                exit(1);
+            }
+
+            memory_region_init_ram(pvlock, NULL, "pvlock", pvlock_size, NULL);
+            memory_region_add_subregion(sysmem, pvlock_reg_base, pvlock);
+        }
         if (!aarch64 && vms->virt) {
             error_report("KVM does not support EL2 on an AArch32 vCPU");
             exit(1);
@@ -2285,6 +2320,11 @@ static void virt_post_cpus_gic_realized(VirtMachineState *vms,
                 kvm_arm_pvtime_init(ARM_CPU(cpu), pvtime_reg_base
                                                   + cpu->cpu_index
                                                     * PVTIME_SIZE_PER_CPU);
+            }
+            if (pv_lock) {
+                kvm_arm_pvlock_init(ARM_CPU(cpu), pvlock_reg_base
+                                                  + cpu->cpu_index
+                                                    * PVLOCK_SIZE_PER_CPU);
             }
         }
     } else {
@@ -2472,6 +2512,11 @@ static void machvirt_init(MachineState *machine)
         if (vmc->no_kvm_steal_time &&
             object_property_find(cpuobj, "kvm-steal-time")) {
             object_property_set_bool(cpuobj, "kvm-steal-time", false, NULL);
+        }
+
+        if (vmc->no_kvm_pv_preempted &&
+            object_property_find(cpuobj, "kvm-pv-preempted")) {
+            object_property_set_bool(cpuobj, "kvm-pv-preempted", false, NULL);
         }
 
         if (vmc->no_tcg_lpa2 && object_property_find(cpuobj, "lpa2")) {
@@ -3807,8 +3852,11 @@ DEFINE_VIRT_MACHINE_AS_LATEST(11, 0)
 
 static void virt_machine_10_2_options(MachineClass *mc)
 {
+    VirtMachineClass *vmc = VIRT_MACHINE_CLASS(OBJECT_CLASS(mc));
+
     virt_machine_11_0_options(mc);
     compat_props_add(mc->compat_props, hw_compat_10_2, hw_compat_10_2_len);
+    vmc->no_kvm_pv_preempted = true;
 }
 DEFINE_VIRT_MACHINE(10, 2)
 

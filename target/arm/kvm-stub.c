@@ -80,6 +80,16 @@ void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa)
     g_assert_not_reached();
 }
 
+bool kvm_arm_pv_lock_supported(ARMCPU *cpu)
+{
+    return false;
+}
+
+void kvm_arm_pvlock_init(ARMCPU *cpu, uint64_t ipa)
+{
+    g_assert_not_reached();
+}
+
 void kvm_arm_steal_time_finalize(ARMCPU *cpu, Error **errp)
 {
     g_assert_not_reached();

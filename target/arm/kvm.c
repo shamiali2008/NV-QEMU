@@ -519,6 +519,16 @@ static void kvm_steal_time_set(Object *obj, bool value, Error **errp)
     ARM_CPU(obj)->kvm_steal_time = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
 }
 
+static bool kvm_pv_preempted_get(Object *obj, Error **errp)
+{
+    return ARM_CPU(obj)->kvm_pv_preempted != ON_OFF_AUTO_OFF;
+}
+
+static void kvm_pv_preempted_set(Object *obj, bool value, Error **errp)
+{
+    ARM_CPU(obj)->kvm_pv_preempted = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+}
+
 static char *kvm_get_psci_version(Object *obj, Error **errp)
 {
     ARMCPU *cpu = ARM_CPU(obj);
@@ -562,6 +572,13 @@ void kvm_arm_add_vcpu_properties(ARMCPU *cpu)
                              kvm_steal_time_set);
     object_property_set_description(obj, "kvm-steal-time",
                                     "Set off to disable KVM steal time.");
+
+    cpu->kvm_pv_preempted = ON_OFF_AUTO_AUTO;
+    object_property_add_bool(obj, "kvm-pv-preempted", kvm_pv_preempted_get,
+                             kvm_pv_preempted_set);
+    object_property_set_description(obj, "kvm-pv-preempted",
+                                    "Set off to disable KVM PV vcpu_is_preempted "
+                                    "(shared preempted state).");
 
     object_property_add_str(obj, "kvm-psci-version", kvm_get_psci_version,
                             kvm_set_psci_version);
@@ -1882,6 +1899,71 @@ void kvm_arm_pvtime_init(ARMCPU *cpu, uint64_t ipa)
     }
     if (!kvm_arm_set_device_attr(cpu, &attr, "PVTIME IPA")) {
         error_report("failed to init PVTIME IPA");
+        abort();
+    }
+}
+
+bool kvm_arm_pv_lock_supported(ARMCPU *cpu)
+{
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VCPU_PVLOCK_CTRL,
+        .attr = KVM_ARM_VCPU_PVLOCK_IPA,
+    };
+
+    return kvm_vcpu_ioctl(CPU(cpu), KVM_HAS_DEVICE_ATTR, &attr) == 0;
+}
+
+/*
+ * The PV lock hypercall lives in the vendor function range 64-127, whose
+ * pseudo-firmware bitmap KVM leaves cleared by default. Opt in before the
+ * vCPU first runs (KVM refuses changes afterwards). The bitmap is per-VM,
+ * so repeating this for every vCPU is harmless, but each vCPU's cpreg cache
+ * must be updated or the next kvm_arch_put_registers() writes the old value
+ * back and disables it again.
+ */
+static int kvm_arm_pvlock_enable_hvc(ARMCPU *cpu)
+{
+    CPUState *cs = CPU(cpu);
+    uint64_t bmap;
+    int i, ret;
+
+    ret = kvm_get_one_reg(cs, KVM_REG_ARM_VENDOR_HYP_BMAP_2, &bmap);
+    if (ret) {
+        return ret;
+    }
+    bmap |= 1ULL << KVM_REG_ARM_VENDOR_HYP_BIT_PV_LOCK;
+    ret = kvm_set_one_reg(cs, KVM_REG_ARM_VENDOR_HYP_BMAP_2, &bmap);
+    if (ret) {
+        return ret;
+    }
+    for (i = 0; i < cpu->cpreg_array_len; i++) {
+        if (cpu->cpreg_indexes[i] == KVM_REG_ARM_VENDOR_HYP_BMAP_2) {
+            cpu->cpreg_values[i] = bmap;
+            break;
+        }
+    }
+    return 0;
+}
+
+void kvm_arm_pvlock_init(ARMCPU *cpu, uint64_t ipa)
+{
+    struct kvm_device_attr attr = {
+        .group = KVM_ARM_VCPU_PVLOCK_CTRL,
+        .attr = KVM_ARM_VCPU_PVLOCK_IPA,
+        .addr = (uint64_t)&ipa,
+    };
+    int ret;
+
+    if (cpu->kvm_pv_preempted == ON_OFF_AUTO_OFF) {
+        return;
+    }
+    ret = kvm_arm_pvlock_enable_hvc(cpu);
+    if (ret) {
+        error_report("failed to enable PVLOCK hypercall: %s", strerror(-ret));
+        abort();
+    }
+    if (!kvm_arm_set_device_attr(cpu, &attr, "PVLOCK IPA")) {
+        error_report("failed to init PVLOCK IPA");
         abort();
     }
 }
