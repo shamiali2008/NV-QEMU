@@ -30,6 +30,8 @@
 #include "exec/cpu-common.h"
 #include "system/memory.h"
 #include "system/address-spaces.h"
+#include "system/runstate.h"
+#include "qemu/rcu.h"
 
 #define ACPI_HW_ERROR_FW_CFG_FILE           "etc/hardware_errors"
 #define ACPI_HW_ERROR_ADDR_FW_CFG_FILE      "etc/hardware_errors_addr"
@@ -407,6 +409,53 @@ void acpi_build_hest(AcpiGhesState *ags, GArray *table_data,
     }
 }
 
+static bool ghes_buffer_is_shared(AcpiGhesState *ags, hwaddr addr)
+{
+    hwaddr left = ags->hw_error_size;
+    RCU_READ_LOCK_GUARD();
+
+    if (!left || addr > HWADDR_MAX - (left - 1)) {
+        return false;
+    }
+    while (left) {
+        hwaddr len = left, offset;
+        MemoryRegion *mr;
+
+        mr = address_space_translate(ags->as, addr, &offset, &len, true,
+                                     MEMTXATTRS_UNSPECIFIED);
+
+        /* The Realm DMA view denies access to private RAM. */
+        if (!len || !memory_region_is_ram(mr) ||
+            memory_region_is_ram_device(mr) ||
+            !memory_access_is_direct(mr, true, MEMTXATTRS_UNSPECIFIED)) {
+            return false;
+        }
+        addr += len;
+        left -= len;
+    }
+    return true;
+}
+
+static void ghes_buffer_addr_written(void *opaque, off_t start, size_t len)
+{
+    AcpiGhesState *ags = opaque;
+    hwaddr addr;
+
+    ags->addr_bytes_written |= MAKE_64BIT_MASK(start, len);
+    if (ags->addr_bytes_written != UINT8_MAX) {
+        return;
+    }
+    ags->addr_bytes_written = 0;
+    addr = le64_to_cpu(ags->hw_error_le);
+    /* Firmware writes zero when rolling back ACPI table installation. */
+    if (addr && !ghes_buffer_is_shared(ags, addr)) {
+        error_report("GHES buffer at 0x%" HWADDR_PRIx
+                     " is inaccessible: Realm firmware must share the buffer",
+                     addr);
+        vm_stop(RUN_STATE_INTERNAL_ERROR);
+    }
+}
+
 void acpi_ghes_add_fw_cfg(AcpiGhesState *ags, FWCfgState *s,
                           GArray *hardware_error)
 {
@@ -418,9 +467,11 @@ void acpi_ghes_add_fw_cfg(AcpiGhesState *ags, FWCfgState *s,
         fw_cfg_add_file_callback(s, ACPI_HEST_ADDR_FW_CFG_FILE, NULL, NULL,
             NULL, &(ags->hest_addr_le), sizeof(ags->hest_addr_le), false);
     } else {
-        /* Create a read-write fw_cfg file for Address */
-        fw_cfg_add_file_callback(s, ACPI_HW_ERROR_ADDR_FW_CFG_FILE, NULL, NULL,
-            NULL, &(ags->hw_error_le), sizeof(ags->hw_error_le), false);
+        ags->hw_error_size = hardware_error->len;
+        fw_cfg_add_file_callback(s, ACPI_HW_ERROR_ADDR_FW_CFG_FILE, NULL,
+                                 ags->as ? ghes_buffer_addr_written : NULL,
+                                 ags, &ags->hw_error_le,
+                                 sizeof(ags->hw_error_le), false);
     }
 }
 

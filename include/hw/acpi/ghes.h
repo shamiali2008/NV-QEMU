@@ -90,6 +90,8 @@ typedef struct AcpiGhesState {
     bool use_hest_addr; /* True if HEST address is present */
     /* Defaults to address_space_memory. */
     AddressSpace *as;
+    unsigned int hw_error_size;
+    uint8_t addr_bytes_written;
 } AcpiGhesState;
 
 void acpi_build_hest(AcpiGhesState *ags, GArray *table_data,
