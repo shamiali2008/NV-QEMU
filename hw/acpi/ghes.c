@@ -28,6 +28,8 @@
 #include "hw/nvram/fw_cfg.h"
 #include "qemu/uuid.h"
 #include "exec/cpu-common.h"
+#include "system/memory.h"
+#include "system/address-spaces.h"
 
 #define ACPI_HW_ERROR_FW_CFG_FILE           "etc/hardware_errors"
 #define ACPI_HW_ERROR_ADDR_FW_CFG_FILE      "etc/hardware_errors_addr"
@@ -422,9 +424,43 @@ void acpi_ghes_add_fw_cfg(AcpiGhesState *ags, FWCfgState *s,
     }
 }
 
-static void get_hw_error_offsets(uint64_t ghes_addr,
+static AddressSpace *ghes_address_space(AcpiGhesState *ags)
+{
+    return ags->as ?: &address_space_memory;
+}
+
+static bool ghes_read(AcpiGhesState *ags, hwaddr addr, void *buf, hwaddr len,
+                      Error **errp)
+{
+    MemTxResult res = address_space_read(ghes_address_space(ags), addr,
+                                         MEMTXATTRS_UNSPECIFIED, buf, len);
+
+    if (res != MEMTX_OK) {
+        error_setg(errp, "GHES: cannot read guest memory at 0x%" HWADDR_PRIx
+                   " (%u bytes)", addr, (unsigned)len);
+        return false;
+    }
+    return true;
+}
+
+static bool ghes_write(AcpiGhesState *ags, hwaddr addr, const void *buf,
+                       hwaddr len, Error **errp)
+{
+    MemTxResult res = address_space_write(ghes_address_space(ags), addr,
+                                          MEMTXATTRS_UNSPECIFIED, buf, len);
+
+    if (res != MEMTX_OK) {
+        error_setg(errp, "GHES: cannot write guest memory at 0x%" HWADDR_PRIx
+                   " (%u bytes)", addr, (unsigned)len);
+        return false;
+    }
+    return true;
+}
+
+static bool get_hw_error_offsets(AcpiGhesState *ags, uint64_t ghes_addr,
                                  uint64_t *cper_addr,
-                                 uint64_t *read_ack_register_addr)
+                                 uint64_t *read_ack_register_addr,
+                                 Error **errp)
 {
     /*
      * non-HEST version supports only one source, so no need to change
@@ -432,8 +468,9 @@ static void get_hw_error_offsets(uint64_t ghes_addr,
      * the source ID, as it is stored inside the HEST table.
      */
 
-    cpu_physical_memory_read(ghes_addr, cper_addr,
-                             sizeof(*cper_addr));
+    if (!ghes_read(ags, ghes_addr, cper_addr, sizeof(*cper_addr), errp)) {
+        return false;
+    }
 
     *cper_addr = le64_to_cpu(*cper_addr);
 
@@ -442,9 +479,10 @@ static void get_hw_error_offsets(uint64_t ghes_addr,
      * just sizeof(uint64_t).
      */
     *read_ack_register_addr = ghes_addr + sizeof(uint64_t);
+    return true;
 }
 
-static bool get_ghes_source_offsets(uint16_t source_id,
+static bool get_ghes_source_offsets(AcpiGhesState *ags, uint16_t source_id,
                                     uint64_t hest_addr,
                                     uint64_t *cper_addr,
                                     uint64_t *read_ack_start_addr,
@@ -456,8 +494,9 @@ static bool get_ghes_source_offsets(uint16_t source_id,
 
     hest_addr += ACPI_DESC_HEADER_OFFSET;
 
-    cpu_physical_memory_read(hest_addr, &num_sources,
-                             sizeof(num_sources));
+    if (!ghes_read(ags, hest_addr, &num_sources, sizeof(num_sources), errp)) {
+        return false;
+    }
     num_sources = le32_to_cpu(num_sources);
 
     err_source_entry = hest_addr + sizeof(num_sources);
@@ -469,7 +508,9 @@ static bool get_ghes_source_offsets(uint16_t source_id,
         uint64_t addr = err_source_entry;
         uint16_t type, src_id;
 
-        cpu_physical_memory_read(addr, &type, sizeof(type));
+        if (!ghes_read(ags, addr, &type, sizeof(type), errp)) {
+            return false;
+        }
         type = le16_to_cpu(type);
 
         /* For now, we only know the size of GHESv2 table */
@@ -480,7 +521,9 @@ static bool get_ghes_source_offsets(uint16_t source_id,
 
         /* Compare CPER source ID at the GHESv2 structure */
         addr += sizeof(type);
-        cpu_physical_memory_read(addr, &src_id, sizeof(src_id));
+        if (!ghes_read(ags, addr, &src_id, sizeof(src_id), errp)) {
+            return false;
+        }
         if (le16_to_cpu(src_id) == source_id) {
             break;
         }
@@ -496,18 +539,24 @@ static bool get_ghes_source_offsets(uint16_t source_id,
     hest_err_block_addr = err_source_entry + GHES_ERR_STATUS_ADDR_OFF +
                           GAS_ADDR_OFFSET;
 
-    cpu_physical_memory_read(hest_err_block_addr, &error_block_addr,
-                             sizeof(error_block_addr));
+    if (!ghes_read(ags, hest_err_block_addr, &error_block_addr,
+                   sizeof(error_block_addr), errp)) {
+        return false;
+    }
     error_block_addr = le64_to_cpu(error_block_addr);
 
-    cpu_physical_memory_read(error_block_addr, cper_addr,
-                             sizeof(*cper_addr));
+    if (!ghes_read(ags, error_block_addr, cper_addr, sizeof(*cper_addr),
+                   errp)) {
+        return false;
+    }
     *cper_addr = le64_to_cpu(*cper_addr);
 
     hest_read_ack_addr = err_source_entry + GHES_READ_ACK_ADDR_OFF +
                          GAS_ADDR_OFFSET;
-    cpu_physical_memory_read(hest_read_ack_addr, read_ack_start_addr,
-                             sizeof(*read_ack_start_addr));
+    if (!ghes_read(ags, hest_read_ack_addr, read_ack_start_addr,
+                   sizeof(*read_ack_start_addr), errp)) {
+        return false;
+    }
     *read_ack_start_addr = le64_to_cpu(*read_ack_start_addr);
 
     return true;
@@ -527,16 +576,21 @@ bool ghes_record_cper_errors(AcpiGhesState *ags, const void *cper, size_t len,
     }
 
     if (!ags->use_hest_addr) {
-        get_hw_error_offsets(le64_to_cpu(ags->hw_error_le),
-                             &cper_addr, &read_ack_register_addr);
-    } else if (!get_ghes_source_offsets(source_id,
+        if (!get_hw_error_offsets(ags, le64_to_cpu(ags->hw_error_le),
+                                  &cper_addr, &read_ack_register_addr,
+                                  errp)) {
+            return false;
+        }
+    } else if (!get_ghes_source_offsets(ags, source_id,
                     le64_to_cpu(ags->hest_addr_le),
                     &cper_addr, &read_ack_register_addr, errp)) {
             return false;
     }
 
-    cpu_physical_memory_read(read_ack_register_addr,
-                             &read_ack_register, sizeof(read_ack_register));
+    if (!ghes_read(ags, read_ack_register_addr, &read_ack_register,
+                   sizeof(read_ack_register), errp)) {
+        return false;
+    }
 
     /* zero means OSPM does not acknowledge the error */
     if (!read_ack_register) {
@@ -551,11 +605,15 @@ bool ghes_record_cper_errors(AcpiGhesState *ags, const void *cper, size_t len,
      * Clear the Read Ack Register, OSPM will write 1 to this register when
      * it acknowledges the error.
      */
-    cpu_physical_memory_write(read_ack_register_addr,
-                              &read_ack_register, sizeof(uint64_t));
+    if (!ghes_write(ags, read_ack_register_addr, &read_ack_register,
+                    sizeof(uint64_t), errp)) {
+        return false;
+    }
 
     /* Write the generic error data entry into guest memory */
-    cpu_physical_memory_write(cper_addr, cper, len);
+    if (!ghes_write(ags, cper_addr, cper, len, errp)) {
+        return false;
+    }
 
     notifier_list_notify(&acpi_generic_error_notifiers, &source_id);
 
