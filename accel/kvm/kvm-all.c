@@ -1467,6 +1467,7 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension)
  */
 typedef struct HWPoisonPage {
     ram_addr_t ram_addr;
+    bool private_page;
     QLIST_ENTRY(HWPoisonPage) list;
 } HWPoisonPage;
 
@@ -1479,23 +1480,32 @@ static void kvm_unpoison_all(void *param)
 
     QLIST_FOREACH_SAFE(page, &hwpoison_page_list, list, next_page) {
         QLIST_REMOVE(page, list);
-        qemu_ram_remap(page->ram_addr);
+        /* The userspace RAM mapping cannot replace private backing. */
+        if (!page->private_page) {
+            qemu_ram_remap(page->ram_addr);
+        }
         g_free(page);
     }
 }
 
-void kvm_hwpoison_page_add(ram_addr_t ram_addr)
+static HWPoisonPage *kvm_hwpoison_page(ram_addr_t ram_addr)
 {
     HWPoisonPage *page;
 
     QLIST_FOREACH(page, &hwpoison_page_list, list) {
         if (page->ram_addr == ram_addr) {
-            return;
+            return page;
         }
     }
-    page = g_new(HWPoisonPage, 1);
+    page = g_new0(HWPoisonPage, 1);
     page->ram_addr = ram_addr;
     QLIST_INSERT_HEAD(&hwpoison_page_list, page, list);
+    return page;
+}
+
+void kvm_hwpoison_page_add(ram_addr_t ram_addr)
+{
+    kvm_hwpoison_page(ram_addr);
 }
 
 bool kvm_hwpoisoned_mem(void)
@@ -3788,6 +3798,33 @@ int kvm_set_memory_attributes_shared(hwaddr start, uint64_t size)
     return kvm_set_memory_attributes(start, size, 0);
 }
 
+static HWPoisonPage *kvm_track_private_poison(hwaddr gpa, uint64_t size)
+{
+    MemoryRegionSection section;
+    HWPoisonPage *page;
+    ram_addr_t addr;
+
+    if (size != qemu_real_host_page_size() || !QEMU_IS_ALIGNED(gpa, size)) {
+        error_report("KVM: unexpected poison range at 0x%" HWADDR_PRIx, gpa);
+        return NULL;
+    }
+
+    section = memory_region_find(get_system_memory(), gpa, size);
+    if (!section.mr || !memory_region_is_ram(section.mr) ||
+        !memory_region_has_guest_memfd(section.mr) ||
+        !int128_eq(section.size, int128_make64(size))) {
+        memory_region_unref(section.mr);
+        error_report("KVM: no guest_memfd page at 0x%" HWADDR_PRIx, gpa);
+        return NULL;
+    }
+    addr = memory_region_get_ram_addr(section.mr) + section.offset_within_region;
+    memory_region_unref(section.mr);
+    page = kvm_hwpoison_page(addr);
+    page->private_page = true;
+
+    return page;
+}
+
 int kvm_cpu_exec(CPUState *cpu)
 {
     struct kvm_run *run = cpu->kvm_run;
@@ -3851,6 +3888,22 @@ int kvm_cpu_exec(CPUState *cpu)
                 trace_kvm_io_window_exit();
                 kvm_eat_signals(cpu);
                 ret = EXCP_INTERRUPT;
+                break;
+            }
+            if (run_ret == -EHWPOISON &&
+                run->exit_reason == KVM_EXIT_MEMORY_FAULT &&
+                run->memory_fault.flags == KVM_MEMORY_EXIT_FLAG_PRIVATE &&
+                kvm_state->guest_state_protected) {
+                trace_kvm_memory_fault(run->memory_fault.gpa,
+                                       run->memory_fault.size,
+                                       run->memory_fault.flags);
+                bql_lock();
+                kvm_track_private_poison(run->memory_fault.gpa,
+                                         run->memory_fault.size);
+                bql_unlock();
+                error_report("KVM: poisoned private memory at GPA 0x%" PRIx64,
+                             (uint64_t)run->memory_fault.gpa);
+                ret = -1;
                 break;
             }
             if (!(run_ret == -EFAULT && run->exit_reason == KVM_EXIT_MEMORY_FAULT)) {
