@@ -742,6 +742,10 @@ static inline DeviceState *create_acpi_ged(VirtMachineState *vms)
 
     dev = qdev_new(TYPE_ACPI_GED);
     qdev_prop_set_uint32(dev, "ged-event", event);
+    if (vms->realm_hwpoison_ged) {
+        /* Firmware shares the error buffer. The HEST itself stays private. */
+        qdev_prop_set_bit(dev, "x-has-hest-addr", false);
+    }
     object_property_set_link(OBJECT(dev), "bus", OBJECT(vms->bus), &error_abort);
     sbdev = SYS_BUS_DEVICE(dev);
     sysbus_realize_and_unref(sbdev, &error_fatal);
@@ -1085,16 +1089,29 @@ static void virt_powerdown_req(Notifier *n, void *opaque)
     }
 }
 
+static bool virt_report_private_poison(hwaddr gpa, Error **errp)
+{
+    AcpiGhesState *ags = acpi_ghes_get_state();
+
+    if (!ags) {
+        error_setg(errp, "Realm firmware has not published the GHES buffer");
+        return false;
+    }
+
+    return acpi_ghes_memory_errors(ags, ACPI_HEST_SRC_ID_SYNC, gpa, errp);
+}
+
 static void virt_generic_error_req(Notifier *n, void *opaque)
 {
     uint16_t *source_id = opaque;
 
-    /* Currently, only QMP source ID is async */
-    if (*source_id != ACPI_HEST_SRC_ID_QMP) {
+    VirtMachineState *s = container_of(n, VirtMachineState,
+                                       generic_error_notifier);
+
+    if (*source_id != ACPI_HEST_SRC_ID_QMP &&
+        !(s->realm_hwpoison_ged && *source_id == ACPI_HEST_SRC_ID_SYNC)) {
         return;
     }
-
-    VirtMachineState *s = container_of(n, VirtMachineState, generic_error_notifier);
 
     acpi_send_event(s->acpi_dev, ACPI_GENERIC_ERROR);
 }
@@ -2424,6 +2441,12 @@ static void machvirt_init(MachineState *machine)
     unsigned int smp_cpus = machine->smp.cpus;
     unsigned int max_cpus = machine->smp.max_cpus;
 
+    if (vms->realm_hwpoison_ged &&
+        (!kvm_enabled() || !virt_machine_is_confidential(vms) || !vms->ras)) {
+        error_report("x-realm-hwpoison-ged requires a KVM Realm with ras=on");
+        exit(EXIT_FAILURE);
+    }
+
     if (virt_machine_is_confidential(vms) && !kvm_enabled()) {
         error_report("Realm VMs require KVM acceleration");
         exit(EXIT_FAILURE);
@@ -2737,8 +2760,19 @@ static void machvirt_init(MachineState *machine)
     create_pcie(vms);
     create_cxl_host_reg_region(vms);
 
+    if (vms->realm_hwpoison_ged &&
+        (!aarch64 || !firmware_loaded || !virt_is_acpi_enabled(vms) ||
+         !kvm_arm_rme_get_dma_as())) {
+        error_report("Realm error reporting needs ACPI firmware and shared memory");
+        exit(EXIT_FAILURE);
+    }
+
     if (aarch64 && firmware_loaded && virt_is_acpi_enabled(vms)) {
         vms->acpi_dev = create_acpi_ged(vms);
+        if (vms->realm_hwpoison_ged) {
+            ACPI_GED(vms->acpi_dev)->ghes_state.as = kvm_arm_rme_get_dma_as();
+            kvm_set_private_poison_handler(virt_report_private_poison);
+        }
         vms->generic_error_notifier.notify = virt_generic_error_req;
         notifier_list_add(&acpi_generic_error_notifiers,
                           &vms->generic_error_notifier);
@@ -3130,6 +3164,20 @@ static void virt_set_acpi(Object *obj, Visitor *v, const char *name,
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     visit_type_OnOffAuto(v, name, &vms->acpi, errp);
+}
+
+static bool virt_get_realm_hwpoison_ged(Object *obj, Error **errp)
+{
+    return VIRT_MACHINE(obj)->realm_hwpoison_ged;
+}
+
+static void virt_set_realm_hwpoison_ged(Object *obj, bool value, Error **errp)
+{
+    if (phase_check(PHASE_MACHINE_INITIALIZED)) {
+        error_setg(errp, "Set x-realm-hwpoison-ged before starting the VM");
+        return;
+    }
+    VIRT_MACHINE(obj)->realm_hwpoison_ged = value;
 }
 
 static bool virt_get_ras(Object *obj, Error **errp)
@@ -3828,6 +3876,12 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "default-bus-bypass-iommu",
                                           "Set on/off to enable/disable "
                                           "bypass_iommu for default root bus");
+
+    object_class_property_add_bool(oc, "x-realm-hwpoison-ged",
+                                   virt_get_realm_hwpoison_ged,
+                                   virt_set_realm_hwpoison_ged);
+    object_class_property_set_description(oc, "x-realm-hwpoison-ged",
+        "Report poisoned Realm private pages through GHES and GED");
 
     object_class_property_add_bool(oc, "ras", virt_get_ras,
                                    virt_set_ras);

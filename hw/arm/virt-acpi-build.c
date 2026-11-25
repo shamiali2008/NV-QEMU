@@ -1928,6 +1928,10 @@ static const AcpiNotificationSourceId hest_ghes_notify[] = {
     { ACPI_HEST_SRC_ID_QMP, ACPI_GHES_NOTIFY_GPIO },
 };
 
+static const AcpiNotificationSourceId hest_ghes_notify_realm[] = {
+    { ACPI_HEST_SRC_ID_SYNC, ACPI_GHES_NOTIFY_GPIO },
+};
+
 static const AcpiNotificationSourceId hest_ghes_notify_10_0[] = {
     { ACPI_HEST_SRC_ID_SYNC, ACPI_GHES_NOTIFY_SEA },
 };
@@ -1999,7 +2003,10 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables,
         if (ags) {
             acpi_add_table(table_offsets, tables_blob);
 
-            if (!ags->use_hest_addr) {
+            if (vms->realm_hwpoison_ged) {
+                notify = hest_ghes_notify_realm;
+                notify_sz = ARRAY_SIZE(hest_ghes_notify_realm);
+            } else if (!ags->use_hest_addr) {
                 notify = hest_ghes_notify_10_0;
                 notify_sz = ARRAY_SIZE(hest_ghes_notify_10_0);
             } else {

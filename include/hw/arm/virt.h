@@ -155,6 +155,7 @@ struct VirtMachineState {
     bool tcg_its;
     bool virt;
     bool ras;
+    bool realm_hwpoison_ged;
     bool mte;
     bool dtb_randomness;
     bool dtb_randomness_set;
