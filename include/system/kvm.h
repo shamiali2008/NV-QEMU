@@ -190,6 +190,9 @@ typedef struct KVMRouteChange {
 
 /* external API */
 
+typedef bool (*KVMPrivatePoisonHandler)(hwaddr gpa, Error **errp);
+void kvm_set_private_poison_handler(KVMPrivatePoisonHandler handler);
+
 unsigned int kvm_get_max_memslots(void);
 unsigned int kvm_get_free_memslots(void);
 bool kvm_has_sync_mmu(void);

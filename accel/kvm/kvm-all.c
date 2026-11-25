@@ -45,6 +45,7 @@
 #include "trace.h"
 #include "hw/core/irq.h"
 #include "qapi/visitor.h"
+#include "qapi/qapi-events-run-state.h"
 #include "qapi/qapi-types-common.h"
 #include "qapi/qapi-visit-common.h"
 #include "system/reset.h"
@@ -1468,6 +1469,7 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension)
 typedef struct HWPoisonPage {
     ram_addr_t ram_addr;
     bool private_page;
+    int64_t retry_until;
     QLIST_ENTRY(HWPoisonPage) list;
 } HWPoisonPage;
 
@@ -1506,6 +1508,11 @@ static HWPoisonPage *kvm_hwpoison_page(ram_addr_t ram_addr)
 void kvm_hwpoison_page_add(ram_addr_t ram_addr)
 {
     kvm_hwpoison_page(ram_addr);
+}
+
+void kvm_set_private_poison_handler(KVMPrivatePoisonHandler handler)
+{
+    kvm_state->report_private_poison = handler;
 }
 
 bool kvm_hwpoisoned_mem(void)
@@ -3825,6 +3832,46 @@ static HWPoisonPage *kvm_track_private_poison(hwaddr gpa, uint64_t size)
     return page;
 }
 
+/* Called with the BQL held so concurrent faults publish only one record. */
+static int kvm_report_private_poison(hwaddr gpa, uint64_t size)
+{
+    MemoryFailureFlags flags = { .action_required = true };
+    HWPoisonPage *page = kvm_track_private_poison(gpa, size);
+    Error *err = NULL;
+
+    if (!kvm_state->report_private_poison) {
+        error_report("KVM: poisoned private memory at GPA 0x%" HWADDR_PRIx, gpa);
+        return -1;
+    }
+    if (!page) {
+        goto fatal;
+    }
+
+    if (page->retry_until) {
+        if (g_get_monotonic_time() < page->retry_until) {
+            return 0;
+        }
+        error_report("KVM: guest still accessing poisoned GPA 0x%" HWADDR_PRIx,
+                     gpa);
+        goto fatal;
+    }
+
+    if (!kvm_state->report_private_poison(gpa, &err)) {
+        error_report_err(err);
+        goto fatal;
+    }
+    /* Let the guest take the interrupt before retrying becomes fatal. */
+    page->retry_until = g_get_monotonic_time() + G_USEC_PER_SEC;
+    qapi_event_send_memory_failure(MEMORY_FAILURE_RECIPIENT_GUEST,
+                                   MEMORY_FAILURE_ACTION_INJECT, &flags);
+    return 0;
+
+fatal:
+    qapi_event_send_memory_failure(MEMORY_FAILURE_RECIPIENT_GUEST,
+                                   MEMORY_FAILURE_ACTION_FATAL, &flags);
+    return -1;
+}
+
 int kvm_cpu_exec(CPUState *cpu)
 {
     struct kvm_run *run = cpu->kvm_run;
@@ -3898,13 +3945,10 @@ int kvm_cpu_exec(CPUState *cpu)
                                        run->memory_fault.size,
                                        run->memory_fault.flags);
                 bql_lock();
-                kvm_track_private_poison(run->memory_fault.gpa,
-                                         run->memory_fault.size);
+                ret = kvm_report_private_poison(run->memory_fault.gpa,
+                                               run->memory_fault.size);
                 bql_unlock();
-                error_report("KVM: poisoned private memory at GPA 0x%" PRIx64,
-                             (uint64_t)run->memory_fault.gpa);
-                ret = -1;
-                break;
+                continue;
             }
             if (!(run_ret == -EFAULT && run->exit_reason == KVM_EXIT_MEMORY_FAULT)) {
                 fprintf(stderr, "error: kvm run failed %s\n",

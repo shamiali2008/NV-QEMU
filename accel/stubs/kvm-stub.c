@@ -134,6 +134,11 @@ uint32_t kvm_dirty_ring_size(void)
     return 0;
 }
 
+void kvm_set_private_poison_handler(KVMPrivatePoisonHandler handler)
+{
+    g_assert_not_reached();
+}
+
 bool kvm_hwpoisoned_mem(void)
 {
     return false;
